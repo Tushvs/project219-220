@@ -1,209 +1,223 @@
 <?php
 require_once 'config.php';
 checkLogin();
-
+ 
 if (!isTeacher()) {
     header("HTTP/1.1 403 Forbidden");
     die("Access denied");
 }
-
+ 
 $action = $_GET['action'] ?? '';
 $response = [];
-
+ 
 switch ($action) {
     case 'dashboard':
         $teacher_id = $_SESSION['user_id'];
-        
+ 
         // Get class count
-        $sql = "SELECT COUNT(*) as count FROM teacher_classes WHERE teacher_id = $teacher_id";
-        $result = $conn->query($sql);
-        $response['class_count'] = $result->fetch_assoc()['count'];
-        
+        $stmt = $conn->prepare("SELECT COUNT(*) as count FROM teacher_classes WHERE teacher_id = ?");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response['class_count'] = $stmt->get_result()->fetch_assoc()['count'];
+ 
         // Get today's classes count
         $day = date('l');
-        $sql = "SELECT COUNT(*) as count 
+        $stmt = $conn->prepare("SELECT COUNT(*) as count 
                 FROM class_schedule cs
                 JOIN teacher_classes tc ON cs.class_id = tc.class_id
-                WHERE tc.teacher_id = $teacher_id AND cs.day_of_week = '$day'";
-        $result = $conn->query($sql);
-        $response['todays_classes_count'] = $result->fetch_assoc()['count'];
-        
+                WHERE tc.teacher_id = ? AND cs.day_of_week = ?");
+        $stmt->bind_param("is", $teacher_id, $day);
+        $stmt->execute();
+        $response['todays_classes_count'] = $stmt->get_result()->fetch_assoc()['count'];
+ 
         // Get student count
-        $sql = "SELECT COUNT(DISTINCT sc.student_id) as count
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT sc.student_id) as count
                 FROM student_classes sc
                 JOIN teacher_classes tc ON sc.class_id = tc.class_id
-                WHERE tc.teacher_id = $teacher_id";
-        $result = $conn->query($sql);
-        $response['student_count'] = $result->fetch_assoc()['count'];
-        
+                WHERE tc.teacher_id = ?");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response['student_count'] = $stmt->get_result()->fetch_assoc()['count'];
+ 
         // Get materials count
-        $sql = "SELECT COUNT(*) as count FROM study_materials WHERE teacher_id = $teacher_id";
-        $result = $conn->query($sql);
-        $response['materials_count'] = $result->fetch_assoc()['count'];
-        
+        $stmt = $conn->prepare("SELECT COUNT(*) as count FROM study_materials WHERE teacher_id = ?");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response['materials_count'] = $stmt->get_result()->fetch_assoc()['count'];
+ 
         // Get today's schedule
-        $sql = "SELECT c.class_name, cs.start_time, cs.end_time, cs.location 
+        $stmt = $conn->prepare("SELECT c.class_name, cs.start_time, cs.end_time, cs.location 
                 FROM class_schedule cs
                 JOIN classes c ON cs.class_id = c.class_id
                 JOIN teacher_classes tc ON cs.class_id = tc.class_id
-                WHERE tc.teacher_id = $teacher_id AND cs.day_of_week = '$day'
-                ORDER BY cs.start_time";
-        $result = $conn->query($sql);
-        $response['todays_schedule'] = [];
-        while ($row = $result->fetch_assoc()) {
-            $response['todays_schedule'][] = $row;
-        }
+                WHERE tc.teacher_id = ? AND cs.day_of_week = ?
+                ORDER BY cs.start_time");
+        $stmt->bind_param("is", $teacher_id, $day);
+        $stmt->execute();
+        $response['todays_schedule'] = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         break;
-        
+ 
     case 'classes':
         $teacher_id = $_SESSION['user_id'];
-        $sql = "SELECT c.*, 
+        $stmt = $conn->prepare("SELECT c.*, 
                 (SELECT COUNT(*) FROM student_classes WHERE class_id = c.class_id) as student_count
                 FROM classes c
                 JOIN teacher_classes tc ON c.class_id = tc.class_id
-                WHERE tc.teacher_id = $teacher_id
-                ORDER BY c.class_name";
-        $result = $conn->query($sql);
-        $response = [];
-        while ($row = $result->fetch_assoc()) {
-            $response[] = $row;
-        }
+                WHERE tc.teacher_id = ?
+                ORDER BY c.class_name");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         break;
-        
+ 
     case 'attendance_form':
         $class_id = $_GET['class_id'];
         $date = $_GET['date'];
-        
+ 
         // Get class info
-        $sql = "SELECT class_name FROM classes WHERE class_id = $class_id";
-        $result = $conn->query($sql);
-        $response['class_name'] = $result->fetch_assoc()['class_name'];
-        
+        $stmt = $conn->prepare("SELECT class_name FROM classes WHERE class_id = ?");
+        $stmt->bind_param("i", $class_id);
+        $stmt->execute();
+        $response['class_name'] = $stmt->get_result()->fetch_assoc()['class_name'];
+ 
         // Get students in class
-        $sql = "SELECT s.student_id, s.full_name 
+        $stmt = $conn->prepare("SELECT s.student_id, s.full_name 
                 FROM students s
                 JOIN student_classes sc ON s.student_id = sc.student_id
-                WHERE sc.class_id = $class_id
-                ORDER BY s.full_name";
-        $result = $conn->query($sql);
+                WHERE sc.class_id = ?
+                ORDER BY s.full_name");
+        $stmt->bind_param("i", $class_id);
+        $stmt->execute();
+        $students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+ 
+        // PERFORMANCE FIX (was N+1): previously this ran one attendance query PER STUDENT
+        // inside the loop below. Instead, fetch attendance for every student in this
+        // class+date in a single query, then map it in PHP - turns N+1 queries into 2.
+        $stmt = $conn->prepare("SELECT student_id, status FROM attendance 
+                WHERE class_id = ? AND date = ?");
+        $stmt->bind_param("is", $class_id, $date);
+        $stmt->execute();
+        $attendanceRows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+ 
+        $attendanceByStudent = [];
+        foreach ($attendanceRows as $row) {
+            $attendanceByStudent[$row['student_id']] = ['status' => $row['status']];
+        }
+ 
         $response['students'] = [];
-        
-        while ($student = $result->fetch_assoc()) {
-            // Check if attendance already exists
-            $sql = "SELECT status FROM attendance 
-                    WHERE student_id = {$student['student_id']} 
-                    AND class_id = $class_id 
-                    AND date = '$date'";
-            $attendance_result = $conn->query($sql);
-            $student['attendance'] = $attendance_result->num_rows > 0 ? $attendance_result->fetch_assoc() : null;
+        foreach ($students as $student) {
+            $student['attendance'] = $attendanceByStudent[$student['student_id']] ?? null;
             $response['students'][] = $student;
         }
         break;
-        
+ 
     case 'save_attendance':
         $class_id = $_POST['class_id'];
         $date = $_POST['date'];
         $attendance = $_POST['attendance'];
-        
+ 
+        // Prepared once, executed per student - fixes SQL injection on student_id/status
+        // and avoids re-parsing the query on every iteration (was a fresh raw query each time).
+        $checkStmt = $conn->prepare("SELECT attendance_id FROM attendance 
+                WHERE student_id = ? AND class_id = ? AND date = ?");
+        $updateStmt = $conn->prepare("UPDATE attendance SET status = ? WHERE attendance_id = ?");
+        $insertStmt = $conn->prepare("INSERT INTO attendance (student_id, class_id, date, status)
+                VALUES (?, ?, ?, ?)");
+ 
         foreach ($attendance as $student_id => $status) {
-            // Check if record exists
-            $sql = "SELECT attendance_id FROM attendance 
-                    WHERE student_id = $student_id 
-                    AND class_id = $class_id 
-                    AND date = '$date'";
-            $result = $conn->query($sql);
-            
-            if ($result->num_rows > 0) {
-                // Update existing record
-                $attendance_id = $result->fetch_assoc()['attendance_id'];
-                $sql = "UPDATE attendance SET status = '$status' 
-                        WHERE attendance_id = $attendance_id";
+            $checkStmt->bind_param("iis", $student_id, $class_id, $date);
+            $checkStmt->execute();
+            $existing = $checkStmt->get_result()->fetch_assoc();
+ 
+            if ($existing) {
+                $attendance_id = $existing['attendance_id'];
+                $updateStmt->bind_param("si", $status, $attendance_id);
+                $updateStmt->execute();
             } else {
-                // Insert new record
-                $sql = "INSERT INTO attendance (student_id, class_id, date, status)
-                        VALUES ($student_id, $class_id, '$date', '$status')";
+                $insertStmt->bind_param("iiss", $student_id, $class_id, $date, $status);
+                $insertStmt->execute();
             }
-            $conn->query($sql);
         }
-        
+ 
         $response['success'] = true;
         break;
-        
+ 
     case 'assessments':
         $teacher_id = $_SESSION['user_id'];
-        $sql = "SELECT a.*, c.class_name
+        $stmt = $conn->prepare("SELECT a.*, c.class_name
                 FROM marks a
                 JOIN classes c ON a.class_id = c.class_id
                 JOIN teacher_classes tc ON a.class_id = tc.class_id
-                WHERE tc.teacher_id = $teacher_id
+                WHERE tc.teacher_id = ?
                 GROUP BY a.assessment_name, a.class_id, a.assessment_date
-                ORDER BY a.assessment_date DESC";
-        $result = $conn->query($sql);
-        $response = [];
-        while ($row = $result->fetch_assoc()) {
-            $response[] = $row;
-        }
+                ORDER BY a.assessment_date DESC");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         break;
-        
+ 
     case 'get_assessment':
         $assessment_id = $_GET['id'];
-        $sql = "SELECT * FROM marks WHERE mark_id = $assessment_id";
-        $result = $conn->query($sql);
-        $response = $result->fetch_assoc();
+        $stmt = $conn->prepare("SELECT * FROM marks WHERE mark_id = ?");
+        $stmt->bind_param("i", $assessment_id);
+        $stmt->execute();
+        $response = $stmt->get_result()->fetch_assoc();
         break;
-        
+ 
     case 'add_assessment':
     case 'update_assessment':
         $class_id = $_POST['class_id'];
-        $assessment_name = $conn->real_escape_string($_POST['assessment_name']);
+        $assessment_name = $_POST['assessment_name'];
         $assessment_date = $_POST['assessment_date'];
         $total_marks = $_POST['total_marks'];
-        $comments = isset($_POST['comments']) ? $conn->real_escape_string($_POST['comments']) : '';
-        
+        $comments = $_POST['comments'] ?? '';
+        $teacher_id = $_SESSION['user_id'];
+ 
         if ($action === 'add_assessment') {
-            // Create a new assessment entry
-            $sql = "INSERT INTO marks (class_id, teacher_id, assessment_name, assessment_date, total_marks, comments)
-                    VALUES ($class_id, {$_SESSION['user_id']}, '$assessment_name', '$assessment_date', $total_marks, '$comments')";
-            $conn->query($sql);
+            $stmt = $conn->prepare("INSERT INTO marks 
+                    (class_id, teacher_id, assessment_name, assessment_date, total_marks, comments)
+                    VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param("iissis", $class_id, $teacher_id, $assessment_name, $assessment_date, $total_marks, $comments);
+            $stmt->execute();
             $response['success'] = true;
         } else {
-            // Update existing assessment
             $assessment_id = $_POST['assessment_id'];
-            $sql = "UPDATE marks SET 
-                    class_id = $class_id,
-                    assessment_name = '$assessment_name',
-                    assessment_date = '$assessment_date',
-                    total_marks = $total_marks,
-                    comments = '$comments'
-                    WHERE mark_id = $assessment_id";
-            $conn->query($sql);
+            $stmt = $conn->prepare("UPDATE marks SET 
+                    class_id = ?, assessment_name = ?, assessment_date = ?,
+                    total_marks = ?, comments = ?
+                    WHERE mark_id = ?");
+            $stmt->bind_param("issisi", $class_id, $assessment_name, $assessment_date, $total_marks, $comments, $assessment_id);
+            $stmt->execute();
             $response['success'] = true;
         }
         break;
-        
+ 
     case 'marks_form':
         $assessment_id = $_GET['assessment_id'];
-        
+ 
         // Get assessment details
-        $sql = "SELECT m.*, c.class_name
+        $stmt = $conn->prepare("SELECT m.*, c.class_name
                 FROM marks m
                 JOIN classes c ON m.class_id = c.class_id
-                WHERE m.mark_id = $assessment_id";
-        $result = $conn->query($sql);
-        $response['assessment'] = $result->fetch_assoc();
-        
+                WHERE m.mark_id = ?");
+        $stmt->bind_param("i", $assessment_id);
+        $stmt->execute();
+        $response['assessment'] = $stmt->get_result()->fetch_assoc();
+ 
         // Get students in the class
         $class_id = $response['assessment']['class_id'];
-        $sql = "SELECT s.student_id, s.full_name, m.marks_obtained, m.comments
+        $stmt = $conn->prepare("SELECT s.student_id, s.full_name, m.marks_obtained, m.comments
                 FROM students s
                 JOIN student_classes sc ON s.student_id = sc.student_id
-                LEFT JOIN marks m ON s.student_id = m.student_id AND m.mark_id = $assessment_id
-                WHERE sc.class_id = $class_id
-                ORDER BY s.full_name";
-        $result = $conn->query($sql);
+                LEFT JOIN marks m ON s.student_id = m.student_id AND m.mark_id = ?
+                WHERE sc.class_id = ?
+                ORDER BY s.full_name");
+        $stmt->bind_param("ii", $assessment_id, $class_id);
+        $stmt->execute();
+        $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+ 
         $response['students'] = [];
-        
-        while ($row = $result->fetch_assoc()) {
+        foreach ($rows as $row) {
             $response['students'][] = [
                 'student_id' => $row['student_id'],
                 'full_name' => $row['full_name'],
@@ -214,194 +228,183 @@ switch ($action) {
             ];
         }
         break;
-        
+ 
     case 'save_marks':
         $assessment_id = $_POST['assessment_id'];
         $marks = $_POST['marks'];
-        
+ 
         // First get assessment details
-        $sql = "SELECT class_id, total_marks FROM marks WHERE mark_id = $assessment_id";
-        $result = $conn->query($sql);
-        $assessment = $result->fetch_assoc();
-        
+        $stmt = $conn->prepare("SELECT class_id, teacher_id, assessment_name, assessment_date, total_marks 
+                FROM marks WHERE mark_id = ?");
+        $stmt->bind_param("i", $assessment_id);
+        $stmt->execute();
+        $assessment = $stmt->get_result()->fetch_assoc();
+ 
+        $checkStmt = $conn->prepare("SELECT mark_id FROM marks 
+                WHERE student_id = ? AND assessment_name = ? AND class_id = ?");
+        $updateStmt = $conn->prepare("UPDATE marks SET marks_obtained = ?, comments = ? WHERE mark_id = ?");
+        $insertStmt = $conn->prepare("INSERT INTO marks 
+                (student_id, class_id, teacher_id, assessment_name, assessment_date, marks_obtained, total_marks, comments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+ 
         foreach ($marks as $mark) {
             $student_id = $mark['student_id'];
             $marks_obtained = $mark['marks_obtained'];
-            $comments = $conn->real_escape_string($mark['comments']);
-            
-            // Check if record exists
-            $sql = "SELECT mark_id FROM marks 
-                    WHERE student_id = $student_id 
-                    AND assessment_name = (
-                        SELECT assessment_name FROM marks WHERE mark_id = $assessment_id
-                    )
-                    AND class_id = {$assessment['class_id']}";
-            $result = $conn->query($sql);
-            
-            if ($result->num_rows > 0) {
-                // Update existing record
-                $mark_id = $result->fetch_assoc()['mark_id'];
-                $sql = "UPDATE marks SET 
-                        marks_obtained = $marks_obtained,
-                        comments = '$comments'
-                        WHERE mark_id = $mark_id";
+            $comments = $mark['comments'];
+ 
+            $checkStmt->bind_param("isi", $student_id, $assessment['assessment_name'], $assessment['class_id']);
+            $checkStmt->execute();
+            $existing = $checkStmt->get_result()->fetch_assoc();
+ 
+            if ($existing) {
+                $mark_id = $existing['mark_id'];
+                $updateStmt->bind_param("dsi", $marks_obtained, $comments, $mark_id);
+                $updateStmt->execute();
             } else {
-                // Insert new record
-                $sql = "INSERT INTO marks (
-                        student_id, class_id, teacher_id, assessment_name, 
-                        assessment_date, marks_obtained, total_marks, comments
-                    ) SELECT 
-                        $student_id, class_id, teacher_id, assessment_name,
-                        assessment_date, $marks_obtained, total_marks, '$comments'
-                    FROM marks WHERE mark_id = $assessment_id";
+                $insertStmt->bind_param(
+                    "iiissdds",
+                    $student_id, $assessment['class_id'], $assessment['teacher_id'],
+                    $assessment['assessment_name'], $assessment['assessment_date'],
+                    $marks_obtained, $assessment['total_marks'], $comments
+                );
+                $insertStmt->execute();
             }
-            $conn->query($sql);
         }
-        
+ 
         $response['success'] = true;
         break;
-        
+ 
     case 'materials':
         $teacher_id = $_SESSION['user_id'];
-        $sql = "SELECT sm.*, c.class_name
+        $stmt = $conn->prepare("SELECT sm.*, c.class_name
                 FROM study_materials sm
                 JOIN classes c ON sm.class_id = c.class_id
-                WHERE sm.teacher_id = $teacher_id
-                ORDER BY sm.upload_date DESC";
-        $result = $conn->query($sql);
-        $response = [];
-        while ($row = $result->fetch_assoc()) {
-            $response[] = $row;
-        }
+                WHERE sm.teacher_id = ?
+                ORDER BY sm.upload_date DESC");
+        $stmt->bind_param("i", $teacher_id);
+        $stmt->execute();
+        $response = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         break;
-        
+ 
     case 'save_material':
         $teacher_id = $_SESSION['user_id'];
         $class_id = $_POST['class_id'];
-        $title = $conn->real_escape_string($_POST['title']);
-        $description = isset($_POST['description']) ? $conn->real_escape_string($_POST['description']) : '';
-        $material_id = isset($_POST['material_id']) ? $_POST['material_id'] : null;
-        
-        // Handle file upload
+        $title = $_POST['title'];
+        $description = $_POST['description'] ?? '';
+        $material_id = $_POST['material_id'] ?? null;
+ 
         if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
             $uploadDir = 'materials/';
             if (!is_dir($uploadDir)) {
                 mkdir($uploadDir, 0755, true);
             }
-            
+ 
             $extension = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
             $filename = 'material_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $extension;
             $destination = $uploadDir . $filename;
-            
+ 
             if (move_uploaded_file($_FILES['file']['tmp_name'], $destination)) {
                 if ($material_id) {
-                    // Delete old file if updating
-                    $sql = "SELECT file_path FROM study_materials WHERE material_id = $material_id";
-                    $result = $conn->query($sql);
-                    $old_file = $result->fetch_assoc()['file_path'];
+                    $stmt = $conn->prepare("SELECT file_path FROM study_materials WHERE material_id = ?");
+                    $stmt->bind_param("i", $material_id);
+                    $stmt->execute();
+                    $old_file = $stmt->get_result()->fetch_assoc()['file_path'];
                     if (file_exists($old_file)) {
                         unlink($old_file);
                     }
-                }
-                
-                if ($material_id) {
-                    // Update existing material
-                    $sql = "UPDATE study_materials SET 
-                            class_id = $class_id,
-                            title = '$title',
-                            description = '$description',
-                            file_path = '$destination'
-                            WHERE material_id = $material_id";
+ 
+                    $stmt = $conn->prepare("UPDATE study_materials SET 
+                            class_id = ?, title = ?, description = ?, file_path = ?
+                            WHERE material_id = ?");
+                    $stmt->bind_param("isssi", $class_id, $title, $description, $destination, $material_id);
+                    $stmt->execute();
                 } else {
-                    // Insert new material
-                    $sql = "INSERT INTO study_materials (
-                            class_id, teacher_id, title, description, file_path
-                        ) VALUES (
-                            $class_id, $teacher_id, '$title', '$description', '$destination'
-                        )";
+                    $stmt = $conn->prepare("INSERT INTO study_materials 
+                            (class_id, teacher_id, title, description, file_path)
+                            VALUES (?, ?, ?, ?, ?)");
+                    $stmt->bind_param("iisss", $class_id, $teacher_id, $title, $description, $destination);
+                    $stmt->execute();
                 }
-                $conn->query($sql);
                 $response['success'] = true;
             } else {
                 $response['success'] = false;
                 $response['message'] = "Error uploading file";
             }
         } elseif ($material_id) {
-            // Update without changing file
-            $sql = "UPDATE study_materials SET 
-                    class_id = $class_id,
-                    title = '$title',
-                    description = '$description'
-                    WHERE material_id = $material_id";
-            $conn->query($sql);
+            $stmt = $conn->prepare("UPDATE study_materials SET 
+                    class_id = ?, title = ?, description = ?
+                    WHERE material_id = ?");
+            $stmt->bind_param("issi", $class_id, $title, $description, $material_id);
+            $stmt->execute();
             $response['success'] = true;
         } else {
             $response['success'] = false;
             $response['message'] = "No file uploaded";
         }
         break;
-        
+ 
     case 'delete_material':
         $material_id = $_POST['material_id'];
-        
-        // First get file path to delete the file
-        $sql = "SELECT file_path FROM study_materials WHERE material_id = $material_id";
-        $result = $conn->query($sql);
-        $file_path = $result->fetch_assoc()['file_path'];
-        
+ 
+        $stmt = $conn->prepare("SELECT file_path FROM study_materials WHERE material_id = ?");
+        $stmt->bind_param("i", $material_id);
+        $stmt->execute();
+        $file_path = $stmt->get_result()->fetch_assoc()['file_path'];
+ 
         if (file_exists($file_path)) {
             unlink($file_path);
         }
-        
-        // Delete record from database
-        $sql = "DELETE FROM study_materials WHERE material_id = $material_id";
-        $conn->query($sql);
-        
+ 
+        $stmt = $conn->prepare("DELETE FROM study_materials WHERE material_id = ?");
+        $stmt->bind_param("i", $material_id);
+        $stmt->execute();
+ 
         $response['success'] = true;
         break;
-        
+ 
     case 'students':
         $teacher_id = $_SESSION['user_id'];
-        $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : null;
-        
+        $class_id = $_GET['class_id'] ?? null;
+ 
         if ($class_id) {
-            // Students in a specific class
-            $sql = "SELECT s.student_id, s.full_name, s.email, s.phone
+            $stmt = $conn->prepare("SELECT s.student_id, s.full_name, s.email, s.phone
                     FROM students s
                     JOIN student_classes sc ON s.student_id = sc.student_id
                     JOIN teacher_classes tc ON sc.class_id = tc.class_id
-                    WHERE tc.teacher_id = $teacher_id AND sc.class_id = $class_id
-                    ORDER BY s.full_name";
+                    WHERE tc.teacher_id = ? AND sc.class_id = ?
+                    ORDER BY s.full_name");
+            $stmt->bind_param("ii", $teacher_id, $class_id);
+            $stmt->execute();
+            $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            foreach ($rows as $row) {
+                $row['classes'] = [$row['class_name'] ?? null];
+                $response[] = $row;
+            }
         } else {
-            // All students across teacher's classes
-            $sql = "SELECT s.student_id, s.full_name, s.email, s.phone,
+            $stmt = $conn->prepare("SELECT s.student_id, s.full_name, s.email, s.phone,
                     GROUP_CONCAT(c.class_name SEPARATOR ', ') as classes
                     FROM students s
                     JOIN student_classes sc ON s.student_id = sc.student_id
                     JOIN classes c ON sc.class_id = c.class_id
                     JOIN teacher_classes tc ON sc.class_id = tc.class_id
-                    WHERE tc.teacher_id = $teacher_id
+                    WHERE tc.teacher_id = ?
                     GROUP BY s.student_id
-                    ORDER BY s.full_name";
-        }
-        
-        $result = $conn->query($sql);
-        $response = [];
-        while ($row = $result->fetch_assoc()) {
-            if ($class_id) {
-                $row['classes'] = [$row['class_name']];
-            } else {
+                    ORDER BY s.full_name");
+            $stmt->bind_param("i", $teacher_id);
+            $stmt->execute();
+            $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            foreach ($rows as $row) {
                 $row['classes'] = explode(', ', $row['classes']);
+                $response[] = $row;
             }
-            $response[] = $row;
         }
         break;
-        
+ 
     default:
         header("HTTP/1.1 400 Bad Request");
         die("Invalid action");
 }
-
+ 
 header('Content-Type: application/json');
 echo json_encode($response);
 ?>
